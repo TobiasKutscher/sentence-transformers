@@ -20,6 +20,7 @@ import math
 import queue
 import tempfile
 from distutils.dir_util import copy_tree
+import wandb
 
 from . import __MODEL_HUB_ORGANIZATION__
 from .evaluation import SentenceEvaluator
@@ -464,12 +465,10 @@ class SentenceTransformer(nn.Sequential):
                 raise ValueError("You passed and invalid repository name: {}.".format(repo_name))
 
         endpoint = "https://huggingface.co"
-        repo_id = repo_name
-        if organization:
-          repo_id = f"{organization}/{repo_id}"
         repo_url = HfApi(endpoint=endpoint).create_repo(
-                repo_id=repo_id,
-                token=token,
+                token,
+                repo_name,
+                organization=organization,
                 private=private,
                 repo_type=None,
                 exist_ok=exist_ok,
@@ -591,7 +590,9 @@ class SentenceTransformer(nn.Sequential):
             show_progress_bar: bool = True,
             checkpoint_path: str = None,
             checkpoint_save_steps: int = 500,
-            checkpoint_save_total_limit: int = 0
+            checkpoint_save_total_limit: int = 0,
+            use_wandb: bool = False,
+            wandb_config = None
             ):
         """
         Train the model with the given training objective
@@ -621,7 +622,9 @@ class SentenceTransformer(nn.Sequential):
         :param checkpoint_save_steps: Will save a checkpoint after so many steps
         :param checkpoint_save_total_limit: Total number of checkpoints to store
         """
-
+        if use_wandb:
+            wandb.init(project=wandb_config["project_name"], config=wandb_config, name=wandb_config["run_id"], dir="./utils/wandb")
+            
         ##Add info to model card
         #info_loss_functions = "\n".join(["- {} with {} training examples".format(str(loss), len(dataloader)) for dataloader, loss in train_objectives])
         info_loss_functions =  []
@@ -680,7 +683,11 @@ class SentenceTransformer(nn.Sequential):
         data_iterators = [iter(dataloader) for dataloader in dataloaders]
 
         num_train_objectives = len(train_objectives)
+        
+        if use_wandb:
+            wandb.watch(loss_model, log_freq=100)
 
+        
         skip_scheduler = False
         for epoch in trange(epochs, desc="Epoch", disable=not show_progress_bar):
             training_steps = 0
@@ -724,7 +731,11 @@ class SentenceTransformer(nn.Sequential):
                         loss_value.backward()
                         torch.nn.utils.clip_grad_norm_(loss_model.parameters(), max_grad_norm)
                         optimizer.step()
-
+                        
+                    if use_wandb: 
+                        wandb.log({"loss": loss_value})
+                    
+                    
                     optimizer.zero_grad()
 
                     if not skip_scheduler:
@@ -735,6 +746,27 @@ class SentenceTransformer(nn.Sequential):
 
                 if evaluation_steps > 0 and training_steps % evaluation_steps == 0:
                     self._eval_during_training(evaluator, output_path, save_best_model, epoch, training_steps, callback)
+                    scores_eval = evaluator.compute_metrices(self)
+                    #import ipdb 
+                    #ipdb.set_trace()
+                    
+                    if use_wandb:
+                        wandb.log({"accuracy@1": scores_eval["cos_sim"]["accuracy@k"][1],
+                                   "accuracy@3": scores_eval["cos_sim"]["accuracy@k"][3],
+                                   "accuracy@5": scores_eval["cos_sim"]["accuracy@k"][5], 
+                                   "accuracy@10": scores_eval["cos_sim"]["accuracy@k"][10],
+                                   "precision@1": scores_eval["cos_sim"]["precision@k"][1],
+                                   "precision@3": scores_eval["cos_sim"]["precision@k"][3],
+                                   "precision@5": scores_eval["cos_sim"]["precision@k"][5], 
+                                   "precision@10": scores_eval["cos_sim"]["precision@k"][10],
+                                   "recall@1": scores_eval["cos_sim"]["recall@k"][1],
+                                   "recall@3": scores_eval["cos_sim"]["recall@k"][3],
+                                   "recall@5": scores_eval["cos_sim"]["recall@k"][5], 
+                                   "recall@10": scores_eval["cos_sim"]["recall@k"][10],
+                                   "ndcg@10": scores_eval["cos_sim"]["ndcg@k"][10],
+                                   "mrr@10": scores_eval["cos_sim"]["mrr@k"][10],
+                                   "map@100": scores_eval["cos_sim"]["map@k"][100], 
+                                  })
 
                     for loss_model in loss_models:
                         loss_model.zero_grad()
